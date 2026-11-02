@@ -460,7 +460,7 @@ Placement is per backend:
   Launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it, instead of attempting a live cutover.
 - A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 - Raw launch commands are not accepted for remote secondmates.
-- Backends that already refuse secondmate launch, currently Orca, cmux, and paseo, remain unsupported on the remote host.
+- Orca supports [local secondmate homes](orca-backend.md#local-secondmates), but this SSH route remains Herdr-only; cmux and paseo do not support secondmate launch.
 
 ### Liveness recovery
 

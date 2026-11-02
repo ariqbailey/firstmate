@@ -825,6 +825,14 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
+      if [ "$(fm_backend_meta_exact_value "$meta" kind 2>/dev/null)" = secondmate ]; then
+        local home
+        home=$(fm_backend_meta_exact_value "$meta" home) || home=
+        if [ "$home" != "$worktree" ] || [ "$project" != "$home" ] || [ "${worktree_id#*::}" != "$home" ]; then
+          echo "REFUSED: Orca secondmate home/workspace binding is inconsistent; preserving task state." >&2
+          return 1
+        fi
+      fi
       window=$terminal
       ;;
     cmux)
@@ -1528,8 +1536,9 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # shared classifier and reads a structured not-found as `missing`. Zellij
 # remains unverified because
 # its secondmate ghost-tab and agent-process recovery path has not been
-# empirically validated. Orca, cmux, paseo, and tern do not support secondmate
-# spawns. The t3code adapter maps the thread's V2 status through its one status
+# empirically validated. Orca supports local secondmate homes but still has no
+# verified agent-process recovery classifier. Cmux, paseo, tern, and hc refuse
+# secondmate spawns. The t3code adapter maps the thread's V2 status through its one status
 # table (bin/backends/t3code.sh); there is no process to attribute locally.
 # Tern answers through the same process classifier from `tern process`, but
 # bin/fm-control-lib.sh's fm_control_backend_state_verified does not list it, so

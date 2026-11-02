@@ -2886,6 +2886,11 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
   if [ "$backend" = t3code ]; then
     { fm_backend_source t3code && fm_backend_t3code_home_env_cleanup "$abs_home_path"; } || return 1
   fi
+  # An Orca secondmate home releases the Orca registrations its receipts own
+  # before the directory holding those receipts can go.
+  if [ "$backend" = orca ]; then
+    { fm_backend_source orca && fm_backend_orca_home_retire "$abs_home_path"; } || return 1
+  fi
   process_event_backup=$(snapshot_firstmate_home_process_events "$abs_home_path" "$label") || return 1
   if ! cleanup_firstmate_home_process_events "$abs_home_path" "$label"; then
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
@@ -3479,6 +3484,9 @@ cleanup_firstmate_home_children() {
           echo "error: herdr pane $child_t for child $child_id is not confirmed gone; retaining that child's durable identity records and stopping forced cleanup" >&2
           return 1
         fi
+      elif [ "$child_backend" = orca ] && [ "$child_kind" = secondmate ]; then
+        fm_backend_source orca || return 1
+        fm_backend_orca_home_close "$child_wt" "$(meta_value "$child_meta" orca_worktree_id)" "$child_t" || return 1
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
@@ -3989,6 +3997,9 @@ elif [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS
   ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
     fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+elif [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
+  fm_backend_source orca || exit 1
+  fm_backend_orca_home_close "$HOME_PATH" "$ORCA_WORKTREE_ID" "$T" || exit 1
 elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   # Undo Firstmate's own opt-in Rex attention mark, progress, and tint first
   # (bin/fm-rex-marks.sh), so a pane the close cannot reach is not left showing
