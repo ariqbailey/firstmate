@@ -47,7 +47,10 @@ if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ];
   exit 0
 fi
 if [ "${1:-}:${2:-}" = project:setups ]; then
-  cat "$RESP/setups.json"
+  # setups.<k>.json, when present, answers the k-th setups read instead.
+  k=$(( $(cat "$RESP/.setups-count" 2>/dev/null || echo 0) + 1 ))
+  echo "$k" > "$RESP/.setups-count"
+  if [ -f "$RESP/setups.$k.json" ]; then cat "$RESP/setups.$k.json"; else cat "$RESP/setups.json"; fi
   exit 0
 fi
 n=$next
@@ -606,6 +609,8 @@ test_spawn_orca_secondmate_reuses_seeded_home() {
   assert_grep "terminal=term-sm" "$home/state/$id.meta" "secondmate terminal identity missing"
   assert_not_contains "$(cat "$LOG")" $'worktree\x1fcreate' "persistent home must never allocate a worker checkout"
   assert_contains "$(cat "$LOG")" '2ndmate-orcasmz1' "secondmate terminal title missing"
+  assert_absent "$subhome/state/orca-secondmate-launch" 'published launch kept its in-progress receipt'
+  assert_present "$subhome/state/orca-secondmate-home" 'launched home lost its Orca marker'
   staged=$(tr '\037' '\n' < "$LOG" | sed -n "s/^\. '\([^']*\)'$/\1/p" | tail -1)
   [ -n "$staged" ] && [ -f "$staged" ] || fail "secondmate staged launch missing"
   assert_contains "$(cat "$staged")" "FM_HOME='$subhome'" "secondmate launch must select its own home"
@@ -616,13 +621,19 @@ SH
   chmod +x "$FB/claude"
   ( cd "$subhome" && FM_ORCA_ENV_RESULT="$CASE_DIR/launch-env" PATH="$FB:$PATH" bash "$staged" ) || fail 'staged secondmate launch failed'
   [ "$(cat "$CASE_DIR/launch-env")" = "$(printf '%s\n' "$subhome" "$subhome" "$home")" ] || fail 'secondmate cwd/home/parent environment drifted'
+  # A second launch first proves the home workspace empty; term-sm is there.
+  cp "$RESP/6.out" "$RESP/2.out"
+  cp "$RESP/4.out" "$RESP/1.out"
+  rm -f "$RESP/.count"
+  : > "$LOG"
   if out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$subhome" claude --backend orca --secondmate 2>&1 ); then
     fail "duplicate Orca secondmate spawn succeeded"
   fi
-  assert_contains "$out" 'refusing duplicate launch' "duplicate must fail closed"
+  assert_contains "$out" 'still has a terminal' "duplicate must fail closed"
+  assert_not_contains "$(cat "$LOG")" $'terminal\x1fcreate' 'duplicate launch created another terminal'
   rm -f "$RESP"/*.out "$RESP/.count"
   : > "$LOG"
   printf 'kind=scout\n' > "$subhome/state/live-child.meta"
@@ -632,8 +643,14 @@ SH
   assert_contains "$out" 'still has in-flight work' 'child-work retirement gate lost'
   [ ! -s "$LOG" ] || fail 'child-work gate ran Orca before refusal'
   rm "$subhome/state/live-child.meta"
-  printf '{"ok":true,"result":{"worktree":{"id":"repo-sm::%s","path":"%s","repoId":"repo-sm","isMainWorktree":true}}}\n' "$subhome" "$subhome" > "$RESP/1.out"
-  printf '{"ok":true,"result":{"terminals":[],"totalCount":0,"truncated":true,"hostScope":{"omittedHostIds":[]}}}\n' > "$RESP/2.out"
+  # Every run below first preflights retirement: repo show, worktree show,
+  # worktree list, and terminal list (only the secondmate's own terminal).
+  printf '{"ok":true,"result":{"repo":{"id":"repo-sm"}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"repo-sm::%s","path":"%s","repoId":"repo-sm","isMainWorktree":true}}}\n' "$subhome" "$subhome" > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktrees":[{"id":"repo-sm::%s","isMainWorktree":true}],"totalCount":1,"truncated":false}}\n' "$subhome" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-sm","worktreeId":"repo-sm::%s"}],"totalCount":1,"truncated":false,"hostScope":{"omittedHostIds":[]}}}\n' "$subhome" > "$RESP/4.out"
+  cp "$RESP/2.out" "$RESP/5.out"
+  printf '{"ok":true,"result":{"terminals":[],"totalCount":0,"truncated":true,"hostScope":{"omittedHostIds":[]}}}\n' > "$RESP/6.out"
   if out=$( HOME="$SPAWN_HOME" PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_TEARDOWN_GUARD_DONE=1 \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 ); then fail 'retired home after uncertain close'; fi
@@ -642,16 +659,16 @@ SH
   assert_present "$subhome/.fm-secondmate-home" 'uncertain close removed home'
   rm -f "$RESP/.count"
   : > "$LOG"
-  printf '{"ok":true,"result":{"terminals":[{"handle":"term-sm","worktreeId":"repo-sm::%s"}],"totalCount":1,"truncated":false,"hostScope":{"omittedHostIds":[]}}}\n' "$subhome" > "$RESP/2.out"
-  printf '{"ok":true}\n' > "$RESP/3.out"
-  printf '{"ok":true,"result":{"terminals":[],"totalCount":0,"truncated":false,"hostScope":{"omittedHostIds":[]}}}\n' > "$RESP/4.out"
-  printf '{"ok":true,"result":{"repo":{"id":"repo-sm"}}}\n' > "$RESP/5.out"
-  cp "$RESP/1.out" "$RESP/6.out"
-  printf '{"ok":true,"result":{"worktrees":[{"id":"repo-sm::%s","isMainWorktree":true}],"totalCount":1,"truncated":false}}\n' "$subhome" > "$RESP/7.out"
-  cp "$RESP/4.out" "$RESP/8.out"
-  cp "$RESP/3.out" "$RESP/9.out"
-  printf '{"ok":false,"error":{"code":"repo_not_found"}}\n' > "$RESP/10.out"
-  printf 'mkdir -p %q\n' "$home/state/pending-replies" > "$RESP/4.hook"
+  cp "$RESP/4.out" "$RESP/6.out"
+  printf '{"ok":true}\n' > "$RESP/7.out"
+  printf '{"ok":true,"result":{"terminals":[],"totalCount":0,"truncated":false,"hostScope":{"omittedHostIds":[]}}}\n' > "$RESP/8.out"
+  for n in 9 13; do cp "$RESP/1.out" "$RESP/$n.out"; done
+  for n in 10 14; do cp "$RESP/2.out" "$RESP/$n.out"; done
+  for n in 11 15; do cp "$RESP/3.out" "$RESP/$n.out"; done
+  for n in 12 16; do cp "$RESP/8.out" "$RESP/$n.out"; done
+  cp "$RESP/7.out" "$RESP/17.out"
+  printf '{"ok":false,"error":{"code":"repo_not_found"}}\n' > "$RESP/18.out"
+  printf 'mkdir -p %q\n' "$home/state/pending-replies" > "$RESP/8.hook"
   if out=$( HOME="$SPAWN_HOME" PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_TEARDOWN_GUARD_DONE=1 \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 ); then fail 'retired home after late pending-reply change'; fi
@@ -659,7 +676,7 @@ SH
   assert_not_contains "$(cat "$LOG")" $'setup-delete' 'late recheck failure released owned Orca registrations'
   assert_present "$home/state/$id.meta" 'late recheck failure removed metadata'
   assert_present "$subhome/.fm-secondmate-home" 'late recheck failure removed home'
-  rm -f "$RESP/4.hook"
+  rm -f "$RESP/8.hook"
   out=$( HOME="$SPAWN_HOME" PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_TEARDOWN_GUARD_DONE=1 \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
@@ -1782,6 +1799,269 @@ test_partial_home_terminal_create_retains_identity() {
   pass 'failed secondmate terminal creation retains its returned identity for exact cleanup'
 }
 
+# Seeds a primary home plus a secondmate home for Orca secondmate cases and
+# queues the six Orca answers a first launch reads. Sets SM_ID SM_PRIMARY SM_HOME.
+orca_secondmate_fixture() { # <case> <id>
+  SM_ID=$2
+  SM_PRIMARY="$TMP_ROOT/$1-primary"
+  SM_HOME="$TMP_ROOT/$1-home"
+  fm_git_init_commit "$SM_HOME"
+  mkdir -p "$SM_PRIMARY/data/$SM_ID" "$SM_PRIMARY/state" "$SM_PRIMARY/config" "$SM_PRIMARY/projects" \
+    "$SM_HOME/bin" "$SM_HOME/data" "$SM_HOME/state" "$SM_HOME/projects"
+  printf '%s\n' "$SM_ID" > "$SM_HOME/.fm-secondmate-home"
+  printf 'firstmate\n' > "$SM_HOME/AGENTS.md"
+  printf 'Idle test charter.\n' > "$SM_HOME/data/charter.md"
+  printf 'manual\n' > "$SM_PRIMARY/config/backlog-backend"
+  touch "$SM_PRIMARY/state/.last-watcher-beat"
+  orca_case "$1"
+  printf '{"ok":false,"error":{"code":"repo_not_found"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-sm"}}}\n' > "$RESP/2.out"
+  sm_root_response "$RESP/3.out"
+  home_setup_response "$SM_HOME" repo-sm
+  cp "$RESP/3.out" "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-sm"}}}\n' > "$RESP/5.out"
+  sm_inventory_response term-sm "$RESP/6.out"
+}
+
+sm_root_response() { # <file>
+  printf '{"ok":true,"result":{"worktree":{"id":"repo-sm::%s","path":"%s","repoId":"repo-sm","isMainWorktree":true}}}\n' "$SM_HOME" "$SM_HOME" > "$1"
+}
+
+sm_inventory_response() { # <handle|-> <file>
+  if [ "$1" = - ]; then
+    printf '{"ok":true,"result":{"terminals":[],"totalCount":0,"truncated":false,"hostScope":{"omittedHostIds":[]}}}\n' > "$2"
+  else
+    printf '{"ok":true,"result":{"terminals":[{"handle":"%s","worktreeId":"repo-sm::%s"}],"totalCount":1,"truncated":false,"hostScope":{"omittedHostIds":[]}}}\n' "$1" "$SM_HOME" > "$2"
+  fi
+}
+
+sm_spawn() { # [fm-spawn args...]
+  HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SM_PRIMARY" FM_STATE_OVERRIDE="$SM_PRIMARY/state" FM_DATA_OVERRIDE="$SM_PRIMARY/data" \
+    FM_CONFIG_OVERRIDE="$SM_PRIMARY/config" FM_PROJECTS_OVERRIDE="$SM_PRIMARY/projects" FM_SPAWN_NO_GUARD=1 \
+    FM_SKIP_SECONDMATE_SYNC=1 FM_SKIP_SECONDMATE_INHERIT=1 \
+    "$ROOT/bin/fm-spawn.sh" "$SM_ID" "$SM_HOME" claude "$@" --secondmate
+}
+
+sm_teardown() { # [fm-teardown args...]
+  HOME="$SPAWN_HOME" PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SM_PRIMARY" FM_TEARDOWN_GUARD_DONE=1 \
+    "$ROOT/bin/fm-teardown.sh" "$SM_ID" "$@"
+}
+
+sm_reset_responses() {
+  rm -f "${RESP:?}"/*.out "${RESP:?}"/*.exit "${RESP:?}"/*.hook "${RESP:?}/.count"
+  : > "$LOG"
+}
+
+sm_launched() { # <case> <id>
+  local out
+  orca_secondmate_fixture "$1" "$2"
+  out=$(sm_spawn --backend orca 2>&1) || fail "Orca secondmate fixture launch failed: $out"
+  sm_reset_responses
+}
+
+test_orca_secondmate_teardown_preflight_keeps_secondmate_running() {
+  local out project
+  sm_launched sm-preflight orcasmpf
+  project="$SM_HOME/projects/sample"
+  mkdir -p "$project"
+  node "$ROOT/bin/backends/orca-home.js" pending "$SM_HOME" "$project" || fail 'could not seed a pending registration'
+  if out=$(sm_teardown 2>&1); then fail 'retired a home with a pending registration'; fi
+  assert_contains "$out" 'unfinished registration' 'pending registration refusal missing'
+  assert_contains "$out" 'preserving the running secondmate' 'refusal did not say the secondmate was kept'
+  assert_not_contains "$(cat "$LOG")" $'terminal\x1fclose' 'teardown closed the secondmate before its retirement preflight'
+  assert_absent "$SM_HOME/state/orca-retired-terminal" 'refused retirement recorded a terminal close'
+  assert_present "$SM_PRIMARY/state/$SM_ID.meta" 'refused retirement removed metadata'
+  fm_git_worktree "$SM_HOME/projects/alpha" "$TMP_ROOT/sm-preflight-child" fm/child
+  fm_write_meta "$SM_HOME/state/child.meta" "window=firstmate:fm-child" "harness=echo" "kind=scout" \
+    "worktree=$TMP_ROOT/sm-preflight-child" "project=$SM_HOME/projects/alpha"
+  : > "$LOG"
+  if out=$(sm_teardown --force 2>&1); then fail 'forced retirement passed a pending registration'; fi
+  assert_contains "$out" 'unfinished registration' 'forced pending registration refusal missing'
+  assert_present "$SM_HOME/state/child.meta" 'forced retirement discarded child work before its Orca preflight'
+  assert_not_contains "$(cat "$LOG")" $'terminal\x1fclose' 'forced teardown closed the secondmate before its preflight'
+  pass 'Orca secondmate retirement preflights registrations before closing the secondmate or discarding children'
+}
+
+test_orca_secondmate_respawn_requires_absent_terminal() {
+  local out
+  sm_launched sm-respawn orcasmrs
+  assert_grep 'terminal=term-sm' "$SM_PRIMARY/state/$SM_ID.meta" 'fixture did not record its terminal'
+  printf 'repo-sm::%s\tterm-sm\n' "$SM_HOME" > "$SM_HOME/state/orca-retired-terminal"
+  sm_root_response "$RESP/1.out"
+  sm_inventory_response - "$RESP/2.out"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-sm"}}}\n' > "$RESP/3.out"
+  sm_root_response "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-sm2"}}}\n' > "$RESP/5.out"
+  sm_inventory_response term-sm2 "$RESP/6.out"
+  out=$(sm_spawn --backend orca 2>&1) || fail "respawn after the terminal disappeared failed: $out"
+  assert_grep 'terminal=term-sm2' "$SM_PRIMARY/state/$SM_ID.meta" 'respawn did not record its new terminal'
+  assert_absent "$SM_HOME/state/orca-secondmate-launch" 'respawn kept its launch receipt'
+  assert_absent "$SM_HOME/state/orca-retired-terminal" 'respawn kept the closed terminal retirement receipt'
+  assert_present "$SM_HOME/state/orca-secondmate-home" 'respawn lost the Orca home marker'
+  pass 'a recorded Orca secondmate relaunches once its home workspace is proven empty'
+}
+
+test_orca_secondmate_refuses_other_backend() {
+  local out
+  sm_launched sm-backend orcasmbk
+  add_tmux_fake "$FB"
+  if out=$(sm_spawn 2>&1); then fail 'default-backend spawn ran beside a recorded Orca secondmate'; fi
+  assert_contains "$out" 'recorded on backend=orca' 'recorded backend refusal missing'
+  if out=$(sm_spawn --backend tmux 2>&1); then fail 'tmux spawn ran beside a recorded Orca secondmate'; fi
+  assert_contains "$out" 'recorded on backend=orca' 'explicit other-backend refusal missing'
+  assert_grep 'backend=orca' "$SM_PRIMARY/state/$SM_ID.meta" 'refused spawn rewrote the Orca record'
+  rm -f "$SM_PRIMARY/state/$SM_ID.meta"
+  if out=$(sm_spawn --backend tmux 2>&1); then fail 'tmux spawn took over an Orca secondmate home'; fi
+  assert_contains "$out" 'is an Orca secondmate home' 'Orca home marker refusal missing'
+  assert_not_contains "$(cat "$LOG")" $'tmux\x1fnew-window' 'refused spawn opened a tmux window'
+  pass 'an Orca secondmate refuses a launch on any other backend'
+}
+
+test_orca_secondmate_create_error_with_handle_closes_terminal() {
+  local out
+  orca_secondmate_fixture sm-create-error orcasmce
+  printf '1\n' > "$RESP/5.exit"
+  sm_inventory_response term-sm "$RESP/7.out"
+  printf '{"ok":true}\n' > "$RESP/8.out"
+  sm_inventory_response - "$RESP/9.out"
+  if out=$(sm_spawn --backend orca 2>&1); then fail 'spawn accepted a failed terminal create'; fi
+  assert_contains "$(cat "$LOG")" $'terminal\x1fclose' 'abort left the returned terminal open'
+  assert_absent "$SM_HOME/state/orca-secondmate-launch" 'abort kept the receipt after a confirmed close'
+  assert_absent "$SM_PRIMARY/state/$SM_ID.meta" 'failed create published metadata'
+  pass 'a failed Orca terminal create that returned a home terminal is closed and its receipt cleared'
+}
+
+test_home_reconcile_pending_registrations() {
+  local out project receipts
+  make_registered_home reconcile-rollback owned
+  project="$TEST_HOME/projects/rollback"
+  mkdir -p "$project"
+  node "$ROOT/bin/backends/orca-home.js" pending "$TEST_HOME" "$project" || fail 'seed pending failed'
+  printf '{"ok":false,"error":{"code":"repo_not_found"}}\n' > "$RESP/1.out"
+  out=$(run_orca_home fm_backend_orca_home_reconcile "$TEST_HOME") || fail "rollback reconcile failed: $out"
+  assert_contains "$out" 'rolled back pending registration' 'rollback not reported'
+  [ -z "$(node "$ROOT/bin/backends/orca-home.js" pending-list "$TEST_HOME")" ] || fail 'pending receipt survived rollback'
+
+  make_registered_home reconcile-adopt owned
+  project="$TEST_HOME/projects/adopt"
+  mkdir -p "$project"
+  node "$ROOT/bin/backends/orca-home.js" pending "$TEST_HOME" "$project" || fail 'seed pending failed'
+  node "$ROOT/bin/backends/orca-home.js" pending-repo "$TEST_HOME" "$project" repo-adopt || fail 'seed pending repo failed'
+  printf '{"ok":true,"result":{"repo":{"id":"repo-other"}}}\n' > "$RESP/1.out"
+  if run_orca_home fm_backend_orca_home_reconcile "$TEST_HOME" >/dev/null 2>&1; then fail 'adopted a registration the add did not create'; fi
+  [ -n "$(node "$ROOT/bin/backends/orca-home.js" pending-list "$TEST_HOME")" ] || fail 'mismatched registration lost its pending receipt'
+  rm -f "${RESP:?}/.count"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-adopt"}}}\n' > "$RESP/1.out"
+  home_setup_response "$project" repo-adopt
+  printf '{"ok":true,"result":{"worktree":{"id":"repo-adopt::%s","path":"%s","repoId":"repo-adopt","isMainWorktree":true}}}\n' "$project" "$project" > "$RESP/2.out"
+  out=$(run_orca_home fm_backend_orca_home_reconcile "$TEST_HOME") || fail "adopt reconcile failed: $out"
+  assert_contains "$out" 'adopted owned registration repo-adopt' 'adoption not reported'
+  out=$(node "$ROOT/bin/backends/orca-home.js" registrations "$TEST_HOME") || fail "adopted receipt unreadable: $out"
+  assert_contains "$out" $'repo-adopt\t' 'adopted registration missing'
+  assert_contains "$out" $'\towned\tready' 'adopted registration is not owned and ready'
+
+  make_registered_home reconcile-temp owned
+  receipts="$TEST_HOME/state/orca-registrations"
+  printf 'partial' > "$receipts/$(printf '%064d' 0).json.4242"
+  : > "$receipts/.DS_Store"
+  node "$ROOT/bin/backends/orca-home.js" registrations "$TEST_HOME" >/dev/null || fail 'stray files blocked the registration inventory'
+  out=$(run_orca_home fm_backend_orca_home_reconcile "$TEST_HOME") || fail "temp reconcile failed: $out"
+  assert_contains "$out" 'removed interrupted receipt write' 'interrupted write not reported'
+  assert_absent "$receipts/$(printf '%064d' 0).json.4242" 'interrupted receipt write survived'
+  assert_present "$receipts/.DS_Store" 'reconcile removed a file it does not own'
+  pass 'Orca home reconcile rolls back absent, adopts matching, and refuses foreign pending registrations'
+}
+
+test_home_setup_ready_retry_is_bounded() {
+  local out
+  orca_case setup-retry
+  TEST_HOME="$CASE_DIR/home"
+  mkdir -p "$TEST_HOME/state"
+  printf 'home-test\n' > "$TEST_HOME/.fm-secondmate-home"
+  printf '{"ok":false,"error":{"code":"repo_not_found"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-home"}}}\n' > "$RESP/2.out"
+  home_root_response "$TEST_HOME" "$RESP/3.out"
+  printf '{"ok":true,"result":{"setups":[{"id":"repo-home","repoId":"repo-home","hostId":"local","path":"%s","setupState":"creating"}]}}\n' "$TEST_HOME" > "$RESP/setups.1.json"
+  out=$(FM_ORCA_SETUP_READY_ATTEMPTS=3 run_orca_home fm_backend_orca_home_repo "$TEST_HOME" "$TEST_HOME") \
+    || fail "a setup that became ready on the second read was refused: $out"
+  [ "$(grep -c $'project\x1fsetups' "$LOG")" = 2 ] || fail 'ready setup was not re-read exactly once'
+  orca_case setup-never-ready
+  TEST_HOME="$CASE_DIR/home"
+  mkdir -p "$TEST_HOME/state"
+  printf 'home-test\n' > "$TEST_HOME/.fm-secondmate-home"
+  printf '{"ok":false,"error":{"code":"repo_not_found"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-home"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"setups":[{"id":"repo-home","repoId":"repo-home","hostId":"local","path":"%s","setupState":"creating"}]}}\n' "$TEST_HOME" > "$RESP/setups.json"
+  if FM_ORCA_SETUP_READY_ATTEMPTS=2 run_orca_home fm_backend_orca_home_repo "$TEST_HOME" "$TEST_HOME" >/dev/null 2>&1; then
+    fail 'a never-ready setup was accepted'
+  fi
+  [ "$(grep -c $'project\x1fsetups' "$LOG")" = 2 ] || fail 'setup retry was not bounded'
+  out=$(node "$ROOT/bin/backends/orca-home.js" pending-list "$TEST_HOME")
+  [ "$out" = "$TEST_HOME"$'\trepo-home' ] || fail "pending receipt did not record the added id: $out"
+  rm -f "${RESP:?}/.count" "${RESP:?}/.setups-count"
+  home_root_response "$TEST_HOME" "$RESP/2.out"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-home"}}}\n' > "$RESP/1.out"
+  out=$(run_orca_home fm_backend_orca_home_reconcile "$TEST_HOME") || fail "reconcile after setup became ready failed: $out"
+  assert_contains "$out" 'adopted owned registration repo-home' 'late-ready registration was not adopted'
+  pass 'Orca setup readiness is re-read a bounded number of times and an added id survives for reconcile'
+}
+
+# Runs bin/fm-orca-reconcile.sh for TEST_HOME's secondmate from PRIMARY.
+reconcile_cli() {
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$PRIMARY" \
+    "$ROOT/bin/fm-orca-reconcile.sh" home-test
+}
+
+reconcile_launch_case() { # <case> <receipt-terminal> [recorded-terminal]
+  make_registered_home "$1" owned
+  PRIMARY="$CASE_DIR/primary"
+  mkdir -p "$PRIMARY/state" "$PRIMARY/data"
+  printf -- '- home-test - test mate (home: %s; scope: tests; projects: ; added 2026-11-02)\n' "$TEST_HOME" > "$PRIMARY/data/secondmates.md"
+  printf 'worktree=repo-home::%s\nterminal=%s\n' "$TEST_HOME" "$2" > "$TEST_HOME/state/orca-secondmate-launch"
+  if [ -n "${3:-}" ]; then
+    printf 'window=2ndmate-home-test\nkind=secondmate\nbackend=orca\nhome=%s\nworktree=%s\nproject=%s\norca_worktree_id=repo-home::%s\nterminal=%s\n' \
+      "$TEST_HOME" "$TEST_HOME" "$TEST_HOME" "$TEST_HOME" "$3" > "$PRIMARY/state/home-test.meta"
+  fi
+}
+
+test_reconcile_cli_resolves_launch_receipts() {
+  local out
+  reconcile_launch_case launch-pending pending
+  home_root_response "$TEST_HOME" "$RESP/1.out"
+  home_inventory_response "$TEST_HOME" absent "$RESP/2.out"
+  out=$(reconcile_cli 2>&1) || fail "pending launch reconcile failed: $out"
+  assert_absent "$TEST_HOME/state/orca-secondmate-launch" 'empty workspace kept a pending launch receipt'
+  assert_absent "$TEST_HOME/state/orca-secondmate-home" 'a launch that never ran marked the home'
+
+  reconcile_launch_case launch-orphan term-home
+  home_root_response "$TEST_HOME" "$RESP/1.out"
+  home_inventory_response "$TEST_HOME" present "$RESP/2.out"
+  home_inventory_response "$TEST_HOME" present "$RESP/3.out"
+  printf '{"ok":true}\n' > "$RESP/4.out"
+  home_inventory_response "$TEST_HOME" absent "$RESP/5.out"
+  home_inventory_response "$TEST_HOME" absent "$RESP/6.out"
+  out=$(reconcile_cli 2>&1) || fail "orphan launch reconcile failed: $out"
+  assert_contains "$(cat "$LOG")" $'terminal\x1fclose\x1f--terminal\x1fterm-home' 'unrecorded launch terminal was not closed'
+  assert_absent "$TEST_HOME/state/orca-secondmate-launch" 'closed launch kept its receipt'
+
+  reconcile_launch_case launch-published term-home term-home
+  home_root_response "$TEST_HOME" "$RESP/1.out"
+  out=$(reconcile_cli 2>&1) || fail "published launch reconcile failed: $out"
+  assert_not_contains "$(cat "$LOG")" $'terminal\x1fclose' 'reconcile closed the recorded secondmate terminal'
+  assert_absent "$TEST_HOME/state/orca-secondmate-launch" 'published launch kept its receipt'
+  assert_present "$TEST_HOME/state/orca-secondmate-home" 'published launch did not mark the home'
+
+  reconcile_launch_case launch-foreign pending
+  home_root_response "$TEST_HOME" "$RESP/1.out"
+  home_inventory_response "$TEST_HOME" present "$RESP/2.out"
+  if out=$(reconcile_cli 2>&1); then fail 'reconciled past an unrecorded terminal'; fi
+  assert_contains "$out" 'named by no record' 'unrecorded terminal refusal missing'
+  assert_present "$TEST_HOME/state/orca-secondmate-launch" 'refused reconcile dropped the receipt'
+  pass 'fm-orca-reconcile.sh retires, rolls back, or refuses launch receipts from a fresh Orca read'
+}
+
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
@@ -1846,3 +2126,11 @@ test_spawn_secondmate_worker_labels
 test_worker_label_postconditions_fail_closed
 
 test_partial_home_terminal_create_retains_identity
+
+test_orca_secondmate_teardown_preflight_keeps_secondmate_running
+test_orca_secondmate_respawn_requires_absent_terminal
+test_orca_secondmate_refuses_other_backend
+test_orca_secondmate_create_error_with_handle_closes_terminal
+test_home_reconcile_pending_registrations
+test_home_setup_ready_retry_is_bounded
+test_reconcile_cli_resolves_launch_receipts

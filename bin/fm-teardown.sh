@@ -3652,8 +3652,24 @@ if [ "$KIND" = secondmate ]; then
   preflight_firstmate_home_process_event_tree "$HOME_PATH" "secondmate home" || exit 1
 fi
 
+# An Orca secondmate's registration retirement is checked while the
+# secondmate still runs: before forced child cleanup can discard anything (its
+# identity checks), and before its own terminal close (every check, with only
+# that terminal allowed to remain in the home workspace).
+if [ "$KIND" = secondmate ] && [ "$BACKEND" = orca ] && [ "$FORCE" = "--force" ]; then
+  fm_backend_source orca || exit 1
+  fm_backend_orca_home_retire_preflight "$HOME_PATH" identity "$ORCA_WORKTREE_ID" "$T" \
+    || { echo "error: Orca registration retirement would refuse; preserving the running secondmate and its children" >&2; exit 1; }
+fi
+
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
+fi
+
+if [ "$KIND" = secondmate ] && [ "$BACKEND" = orca ]; then
+  fm_backend_source orca || exit 1
+  fm_backend_orca_home_retire_preflight "$HOME_PATH" full "$ORCA_WORKTREE_ID" "$T" \
+    || { echo "error: Orca registration retirement would refuse; preserving the running secondmate" >&2; exit 1; }
 fi
 
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then

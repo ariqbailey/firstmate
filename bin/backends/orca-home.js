@@ -2,7 +2,10 @@
 // Persistent Orca home receipts and strict JSON validation. Called by orca.sh.
 // Receipts under <home>/state/orca-registrations survive child task cleanup.
 // A pending receipt never grants ownership; an unknown mutation stays pending
-// for explicit reconciliation. Only an observed new registration is removable.
+// until bin/fm-orca-reconcile.sh adopts or rolls it back from a fresh Orca read.
+// Only an observed new registration is removable. Receipts are named
+// <sha256>.json; anything else in the directory (an interrupted write's
+// <sha256>.json.<pid> temp file, a .DS_Store) is never a receipt.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -37,6 +40,9 @@ function write(file, data) {
   fs.writeFileSync(temp, JSON.stringify(data) + '\n', {mode: 0o600, flag: 'wx'});
   fs.renameSync(temp, file);
 }
+const RECEIPT_NAME = /^[0-9a-f]{64}\.json$/;
+const TEMP_NAME = /^[0-9a-f]{64}\.json\.[0-9]+$/;
+const RECONCILE = 'run bin/fm-orca-reconcile.sh on this home before retrying';
 function receipt(home, project) {
   const file = receiptPath(home, project);
   if (!fs.existsSync(file)) return null;
@@ -45,7 +51,17 @@ function receipt(home, project) {
   if (r.home !== home || r.path !== project || !['pending', 'ready', 'releasing', 'released'].includes(r.state)) refuse('invalid receipt binding');
   if (r.state !== 'pending' && (!atom(r.repo) || !atom(r.setup) || r.worktree !== r.repo + '::' + project || typeof r.owned !== 'boolean'))
     refuse('invalid registration identity');
+  if (r.state === 'pending' && r.repo !== undefined && !atom(r.repo)) refuse('invalid pending registration identity');
   return r;
+}
+function receiptFiles(home) {
+  const dir = homeDir(home);
+  return fs.readdirSync(dir).sort().filter(file => RECEIPT_NAME.test(file)).map(file => {
+    const r = readJSON(path.join(dir, file));
+    const verified = receipt(home, r.path);
+    if (!verified || receiptPath(home, r.path) !== path.join(dir, file)) refuse('unfinished registration');
+    return verified;
+  });
 }
 function rootWorkspace(data, project, repo) {
   const w = result(data).worktree;
@@ -76,7 +92,7 @@ try {
     }
     case 'receipt': {
       const r = receipt(home, project);
-      if (r && r.state !== 'ready') refuse('unfinished Orca registration; reconcile the retained receipt before retrying');
+      if (r && r.state !== 'ready') refuse('unfinished Orca registration; ' + RECONCILE);
       value = r ? r.repo : '';
       break;
     }
@@ -84,13 +100,44 @@ try {
       if (receipt(home, project)) refuse('existing registration receipt');
       write(receiptPath(home, project), {home, path: project, state: 'pending'});
       break;
-    case 'record': {
+    case 'pending-repo': {
+      // The add returned an id: keep the receipt pending, but name the id so a
+      // later reconcile adopts only the registration this add created.
+      const [,, repo] = args;
+      const r = receipt(home, project);
+      if (!r || r.state !== 'pending' || r.repo !== undefined || !atom(repo)) refuse('no unidentified pending registration');
+      write(receiptPath(home, project), {...r, repo});
+      break;
+    }
+    case 'record':
+    case 'adopt': {
       const [,, repo, ownership, setup] = args;
       if (!atom(setup)) refuse('invalid Orca setup identity');
+      if (op === 'adopt') {
+        const r = receipt(home, project);
+        if (!r || r.state !== 'pending' || (r.repo !== undefined && r.repo !== repo)) refuse('pending registration does not match the Orca registration');
+      }
       const w = rootWorkspace(input(), project, repo);
       write(receiptPath(home, project), {home, path: project, state: 'ready', repo,
-        setup, worktree: w.id, owned: ownership === 'owned'});
+        setup, worktree: w.id, owned: op === 'adopt' || ownership === 'owned'});
       value = repo;
+      break;
+    }
+    case 'rollback': {
+      const r = receipt(home, project);
+      if (!r || r.state !== 'pending') refuse('no pending registration to roll back');
+      fs.unlinkSync(receiptPath(home, project));
+      break;
+    }
+    case 'pending-list':
+      for (const r of receiptFiles(home))
+        if (r.state === 'pending') value += [r.path, r.repo || ''].join('\t') + '\n';
+      break;
+    case 'sweep-temp': {
+      // Callers hold the per-home receipt lock, so no writer is mid-rename.
+      const dir = homeDir(home);
+      for (const file of fs.readdirSync(dir))
+        if (TEMP_NAME.test(file)) { fs.unlinkSync(path.join(dir, file)); value += file + '\n'; }
       break;
     }
     case 'setup': {
@@ -99,8 +146,9 @@ try {
       if (!Array.isArray(r.setups)) refuse('missing Orca setup inventory');
       const matches = r.setups.filter(s => s.path === project);
       if (matches.length !== 1 || !atom(matches[0].id) || matches[0].repoId !== repo ||
-          matches[0].hostId !== 'local' || matches[0].setupState !== 'ready')
+          matches[0].hostId !== 'local')
         refuse('Orca project setup identity mismatch');
+      if (matches[0].setupState !== 'ready') process.exit(2);
       value = matches[0].id;
       break;
     }
@@ -143,17 +191,21 @@ try {
     case 'empty':
       if (terminals(input(), args[0]).length) refuse('Orca workspace still has terminals');
       break;
-    case 'registrations': {
-      const dir = homeDir(home);
-      for (const file of fs.readdirSync(dir).sort()) {
-        if (!file.endsWith('.json')) refuse('unfinished registration receipt write');
-        const r = readJSON(path.join(dir, file));
-        const verified = receipt(home, r.path);
-        if (!verified || receiptPath(home, r.path) !== path.join(dir, file) || verified.state === 'pending') refuse('unfinished registration');
-        if (verified.state !== 'released') value += [r.path, r.repo, r.setup, r.worktree, r.owned ? 'owned' : 'reused', r.state].join('\t') + '\n';
-      }
+    case 'empty-except': {
+      // The secondmate's own terminal may remain until its exact close.
+      const [workspace, own] = args;
+      if (terminals(input(), workspace).some(t => t.handle !== own)) refuse('Orca workspace has terminals besides the secondmate\'s own');
       break;
     }
+    case 'handles':
+      value = terminals(input(), args[0]).map(t => t.handle).join('\n');
+      break;
+    case 'registrations':
+      for (const r of receiptFiles(home)) {
+        if (r.state === 'pending') refuse('unfinished registration for ' + r.path + '; ' + RECONCILE);
+        if (r.state !== 'released') value += [r.path, r.repo, r.setup, r.worktree, r.owned ? 'owned' : 'reused', r.state].join('\t') + '\n';
+      }
+      break;
     case 'root-only': {
       const r = result(input());
       if (!Array.isArray(r.worktrees) || r.truncated !== false || r.totalCount !== r.worktrees.length ||

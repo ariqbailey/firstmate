@@ -13,10 +13,23 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
 FM_ORCA_HOME_JSON="$(dirname -- "${BASH_SOURCE[0]}")/orca-home.js"
 
+# A just-added registration can report its setup before Orca finishes it, so a
+# matching setup that is not ready yet is re-read a bounded number of times
+# (FM_ORCA_SETUP_READY_ATTEMPTS, 0.5s apart); an identity mismatch never is.
 fm_backend_orca_home_setup() { # <project-path> <repo-id>
-  local out
-  out=$(orca project setups --host local --json) || return 1
-  printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" setup "$1" "$2"
+  local out attempt=1 attempts=${FM_ORCA_SETUP_READY_ATTEMPTS:-20} rc
+  while :; do
+    out=$(orca project setups --host local --json) || return 1
+    rc=0
+    printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" setup "$1" "$2" || rc=$?
+    [ "$rc" -eq 2 ] || return "$rc"
+    [ "$attempt" -lt "$attempts" ] || {
+      echo "error: Orca project setup for $1 is still not ready after $attempts reads" >&2
+      return 1
+    }
+    attempt=$((attempt + 1))
+    sleep 0.5
+  done
 }
 
 # One per-home lock serializes every registration receipt read-modify-write.
@@ -62,6 +75,7 @@ fm_backend_orca_home_register() { # <seeded-home> <home-or-project-path>
     node "$FM_ORCA_HOME_JSON" pending "$home" "$project" || return 1
     out=$(orca repo add --path "$project" --json) || return 1
     repo=$(printf '%s' "$out" | fm_backend_orca_json_get repo-id) || return 1
+    node "$FM_ORCA_HOME_JSON" pending-repo "$home" "$project" "$repo" || return 1
     owned=owned
   fi
   setup=$(fm_backend_orca_home_setup "$project" "$repo") || return 1
@@ -111,8 +125,13 @@ fm_backend_orca_home_retire() { # <seeded-home>
   fm_backend_orca_home_locked "$1" fm_backend_orca_home_release "$1"
 }
 
-fm_backend_orca_home_release() { # <seeded-home>
-  local home=$1 rows project repo setup workspace ownership lifecycle out
+# Every check retirement makes before its first deletion. `identity` mode
+# skips the root-only and empty-workspace checks, which forced child cleanup
+# can still change; `full` mode runs them, letting only <own-terminal> remain
+# in <home-workspace> when the secondmate's own close has not run yet.
+# `release` is `full` that also journals a deletion an earlier retry confirmed.
+fm_backend_orca_home_registration_check() { # <seeded-home> <full|identity|release> [home-workspace own-terminal]
+  local home=$1 mode=$2 home_workspace=${3:-} own=${4:-} rows project repo setup workspace ownership lifecycle out
   rows=$(node "$FM_ORCA_HOME_JSON" registrations "$home") || return 1
   while IFS=$'\t' read -r project repo setup workspace ownership lifecycle; do
     [ -n "$project" ] || continue
@@ -122,17 +141,34 @@ fm_backend_orca_home_release() { # <seeded-home>
         echo "error: Orca registration disappeared outside its recorded retirement; preserving home" >&2
         return 1
       }
-      node "$FM_ORCA_HOME_JSON" released "$home" "$project" || return 1
+      [ "$mode" != release ] || node "$FM_ORCA_HOME_JSON" released "$home" "$project" || return 1
       continue
     fi
     setup=$(fm_backend_orca_home_setup "$project" "$repo") || return 1
     out=$(orca worktree show --worktree "path:$project" --json) || return 1
     printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" workspace "$home" "$project" "$setup" >/dev/null || return 1
+    [ "$mode" != identity ] || continue
     out=$(orca worktree list --repo "id:$repo" --limit 10000 --json) || return 1
     printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" root-only "$workspace" || return 1
     out=$(orca terminal list --worktree "id:$workspace" --limit 10000 --json) || return 1
-    printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" empty "$workspace" || return 1
+    if [ -n "$own" ] && [ "$workspace" = "$home_workspace" ]; then
+      printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" empty-except "$workspace" "$own" || return 1
+    else
+      printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" empty "$workspace" || return 1
+    fi
   done <<<"$rows"
+}
+
+# Teardown runs this before it closes the secondmate's terminal (and before
+# forced child cleanup, in identity mode), so a retirement that would refuse
+# refuses while the secondmate is still running.
+fm_backend_orca_home_retire_preflight() { # <seeded-home> <full|identity> <home-workspace> <own-terminal>
+  fm_backend_orca_home_locked "$1" fm_backend_orca_home_registration_check "$1" "$2" "$3" "$4"
+}
+
+fm_backend_orca_home_release() { # <seeded-home>
+  local home=$1 rows project repo setup workspace ownership lifecycle out
+  fm_backend_orca_home_registration_check "$home" release || return 1
   rows=$(node "$FM_ORCA_HOME_JSON" registrations "$home") || return 1
   while IFS=$'\t' read -r project repo setup workspace ownership lifecycle; do
     [ -n "$project" ] && [ "$ownership" = owned ] || continue
@@ -394,6 +430,136 @@ fm_backend_orca_home_close() { # <home> <worktree-id> <terminal>
   [ "$(fm_backend_orca_home_workspace "$home" read)" = "$workspace" ] || return 1
   fm_backend_orca_close_confirmed "$workspace" "$terminal" || return 1
   ( umask 077; set -o noclobber; printf '%s\n' "$expected" >"$closed" )
+}
+
+# state/orca-secondmate-home marks a home launched on Orca for as long as it
+# lives (its workers take the labelled path); state/orca-secondmate-launch is
+# only the launch-in-progress receipt, retired once the task record names the
+# terminal. A home launched before the split carries only the receipt.
+fm_backend_orca_home_is_orca() { # <home>
+  local p
+  for p in "$1/state/orca-secondmate-home" "$1/state/orca-secondmate-launch"; do
+    [ -e "$p" ] || [ -L "$p" ] && return 0
+  done
+  return 1
+}
+
+fm_backend_orca_home_mark() { # <home>
+  local marker="$1/state/orca-secondmate-home"
+  [ -f "$marker" ] && [ ! -L "$marker" ] && return 0
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] || {
+    echo "error: unsafe Orca secondmate home marker $marker" >&2
+    return 1
+  }
+  ( umask 077; : >"$marker" )
+}
+
+# A recorded Orca secondmate may be launched again only when a complete
+# inventory of its home workspace is empty: that proves its recorded terminal
+# gone and leaves no other agent in the home. A retirement receipt for that
+# same terminal (a teardown that closed it, then refused) is cleared with it.
+fm_backend_orca_home_respawn_check() { # <home> <recorded-workspace> <recorded-terminal>
+  local home=$1 recorded=$2 terminal=$3 workspace out closed="$1/state/orca-retired-terminal"
+  workspace=$(fm_backend_orca_home_workspace "$home" read) || return 1
+  [ "$workspace" = "$recorded" ] || {
+    echo "error: recorded Orca workspace $recorded is not this home's workspace $workspace; refusing respawn" >&2
+    return 1
+  }
+  out=$(orca terminal list --worktree "id:$workspace" --limit 10000 --json) || return 1
+  printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" empty "$workspace" || {
+    echo "error: the home workspace still has a terminal (recorded: $terminal); refusing a second agent in this home" >&2
+    return 1
+  }
+  if [ -e "$closed" ] || [ -L "$closed" ]; then
+    [ -f "$closed" ] && [ ! -L "$closed" ] && [ "$(cat "$closed")" = "$(printf '%s\t%s' "$recorded" "$terminal")" ] || {
+      echo "error: inconsistent Orca terminal retirement receipt; preserving home" >&2
+      return 1
+    }
+    rm -f "$closed"
+  fi
+}
+
+# Resolves pending registration receipts from a fresh Orca read: a path Orca
+# has no registration for rolls back, one it does (with the id the add
+# returned, when the receipt recorded it) is adopted as owned. Interrupted
+# receipt writes are removed. Runs under the per-home receipt lock.
+fm_backend_orca_home_reconcile_registrations() { # <seeded-home>
+  local home=$1 swept rows project repo current setup out
+  swept=$(node "$FM_ORCA_HOME_JSON" sweep-temp "$home") || return 1
+  [ -z "$swept" ] || printf '%s\n' "$swept" | sed 's/^/removed interrupted receipt write: /'
+  rows=$(node "$FM_ORCA_HOME_JSON" pending-list "$home") || return 1
+  while IFS=$'\t' read -r project repo; do
+    [ -n "$project" ] || continue
+    out=$(orca repo show --repo "path:$project" --json) || true
+    if printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" missing 2>/dev/null; then
+      node "$FM_ORCA_HOME_JSON" rollback "$home" "$project" || return 1
+      printf 'rolled back pending registration: %s\n' "$project"
+      continue
+    fi
+    current=$(printf '%s' "$out" | fm_backend_orca_json_get repo-id 2>/dev/null) || {
+      echo "error: Orca registration lookup for $project is uncertain; keeping its pending receipt" >&2
+      return 1
+    }
+    [ -z "$repo" ] || [ "$repo" = "$current" ] || {
+      echo "error: Orca registers $project as $current, not the $repo this home added; keeping its pending receipt" >&2
+      return 1
+    }
+    setup=$(fm_backend_orca_home_setup "$project" "$current") || return 1
+    out=$(orca worktree show --worktree "path:$project" --json) || return 1
+    printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" adopt "$home" "$project" "$current" owned "$setup" >/dev/null || {
+      echo "error: cannot adopt Orca registration $current for $project; remove it in Orca, then rerun to roll the receipt back" >&2
+      return 1
+    }
+    printf 'adopted owned registration %s: %s\n' "$current" "$project"
+  done <<<"$rows"
+}
+
+fm_backend_orca_home_reconcile() { # <seeded-home>
+  fm_backend_orca_home_locked "$1" fm_backend_orca_home_reconcile_registrations "$1"
+}
+
+# Retires an unfinished launch receipt. The caller holds the parent's per-task
+# record lock, so no spawn of this secondmate is between terminal creation and
+# record publication. A receipt naming the recorded terminal only outlived its
+# publication; otherwise the terminal it names is closed (when it is in this
+# home's workspace), and the receipt goes only once every terminal left there
+# is the recorded one.
+fm_backend_orca_home_reconcile_launch() { # <home> <recorded-workspace> <recorded-terminal>
+  local home=$1 recorded=$2 recorded_terminal=$3 receipt="$1/state/orca-secondmate-launch" worktree terminal workspace out handle
+  [ -e "$receipt" ] || [ -L "$receipt" ] || return 0
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || { echo "error: unsafe Orca launch receipt $receipt" >&2; return 1; }
+  worktree=$(sed -n 's/^worktree=//p' "$receipt")
+  terminal=$(sed -n 's/^terminal=//p' "$receipt")
+  workspace=$(fm_backend_orca_home_workspace "$home" read) || return 1
+  [ "$worktree" = "$workspace" ] || {
+    echo "error: launch receipt names workspace $worktree, not this home's $workspace; preserving it" >&2
+    return 1
+  }
+  if [ -n "$terminal" ] && [ "$terminal" != pending ] && [ "$terminal" = "$recorded_terminal" ] && [ "$workspace" = "$recorded" ]; then
+    fm_backend_orca_home_mark "$home" || return 1
+    rm -f "$receipt"
+    printf 'retired launch receipt: the task record already names terminal %s\n' "$terminal"
+    return 0
+  fi
+  if [ -n "$terminal" ] && [ "$terminal" != pending ]; then
+    if [ "$(fm_backend_orca_terminal_state "$workspace" "$terminal")" = present ]; then
+      fm_backend_orca_close_confirmed "$workspace" "$terminal" || return 1
+      printf 'closed unrecorded launch terminal %s\n' "$terminal"
+    else
+      printf 'warning: launch terminal %s is not in this home workspace; close it in Orca if it still exists\n' "$terminal"
+    fi
+  fi
+  out=$(orca terminal list --worktree "id:$workspace" --limit 10000 --json) || return 1
+  out=$(printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" handles "$workspace") || return 1
+  while IFS= read -r handle; do
+    [ -z "$handle" ] || [ "$handle" = "$recorded_terminal" ] || {
+      echo "error: terminal $handle in the home workspace is named by no record; close it in Orca, then rerun" >&2
+      return 1
+    }
+  done <<<"$out"
+  [ -z "$recorded_terminal" ] || fm_backend_orca_home_mark "$home" || return 1
+  rm -f "$receipt"
+  printf 'rolled back unfinished launch receipt\n'
 }
 
 fm_backend_orca_send_text_line() {  # <terminal-id> <text>

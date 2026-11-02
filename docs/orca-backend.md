@@ -60,16 +60,22 @@ Spawn verifies the labels and absence of a parent before launching the worker.
 Primary-home workers retain their existing names and independent placement.
 
 The adapter records registration ownership in the secondmate's private state.
-Retirement closes and confirms the exact terminal before deleting the home, verifies registrations contain no remaining workers or terminals, and removes only registrations it created.
+Retirement checks every registration it would release while the secondmate is still running, before forced child cleanup and before the terminal close, so a retirement that would refuse leaves the secondmate up.
+It then closes and confirms the exact terminal before deleting the home, verifies registrations contain no remaining workers or terminals, and removes only registrations it created.
 It never invokes worktree removal on the persistent home.
 Pre-existing registrations are preserved.
 Incomplete inventories, failed closes, uncertain registration results, and identity mismatches retain the home and records for reconciliation.
-Existing secondmate metadata or an unfinished launch receipt refuses a second launch.
+A just-added registration whose setup is not ready yet is re-read a bounded number of times before it refuses.
 The shared child-work, pending-reply, and home-removal guards still apply.
 
+A launch holds `state/orca-secondmate-launch` in the home until the task record names its terminal, which refuses a concurrent second launch; a successful launch then marks the home with `state/orca-secondmate-home`.
+A secondmate recorded on Orca, or a home carrying either file, refuses a launch on any other backend.
+Launching a recorded Orca secondmate again, for example after an Orca restart or reboot, is `bin/fm-spawn.sh <id> --backend orca --secondmate`; it proceeds only when a complete inventory of the home workspace is empty, so it never runs a second agent beside a live one.
+When a launch or registration failed part-way, `bin/fm-orca-reconcile.sh <id>` resolves the receipts it left from a fresh Orca read, and its header owns what it adopts, rolls back, or refuses.
+
 Agent-process recovery remains unverified for Orca, including Pi secondmates.
-An idle task, a completed turn, a connected terminal, or a stale terminal handle does not establish that an agent has stopped.
-The control plane continues to refuse exit and relaunch; guarded retirement is a separate explicit lifecycle operation.
+An idle task, a completed turn, a connected terminal, or a stale terminal handle does not establish that an agent has stopped, so the liveness sweep never relaunches an Orca secondmate on its own.
+The control plane continues to refuse exit and relaunch; guarded relaunch and retirement are separate explicit lifecycle operations.
 
 ## Current lifecycle and safety
 

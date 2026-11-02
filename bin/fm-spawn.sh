@@ -2,8 +2,12 @@
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
 # Orca secondmates reuse the seeded home's registered root workspace. Their
-# state/orca-secondmate-launch receipt blocks duplicate or uncertain launches;
-# registration receipts remain in that home until guarded retirement.
+# state/orca-secondmate-launch receipt blocks duplicate or uncertain launches
+# until the task record names the terminal; bin/fm-orca-reconcile.sh resolves
+# one a failed launch left. Launching a recorded Orca secondmate again first
+# proves its home workspace has no terminal, and a secondmate recorded on (or
+# a home marked for) Orca refuses a launch on any other backend.
+# Registration receipts remain in that home until guarded retirement.
 # Workers from an Orca secondmate stay independent in their project repository;
 # their worktree display name and terminal title carry 2ndmate-<id> ownership.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
@@ -3960,19 +3964,46 @@ if [ "$KIND" = secondmate ]; then
   fi
 fi
 
+ORCA_RESPAWN=0
 if [ "$KIND" = secondmate ]; then
-  if [ "$BACKEND" = orca ] && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
-    echo "error: existing Orca secondmate metadata for $ID; recovery is unverified, refusing duplicate launch" >&2
-    exit 1
+  # Orca is explicit-only, so a launch that did not select it must never run
+  # beside, or overwrite the record of, an Orca secondmate's terminal.
+  if [ "$RELAUNCH" -eq 0 ] && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
+    ORCA_RECORDED_BACKEND=$(fm_backend_of_meta "$STATE/$ID.meta")
+    if [ "$ORCA_RECORDED_BACKEND" = orca ] && [ "$BACKEND" != orca ]; then
+      echo "error: secondmate $ID is recorded on backend=orca; relaunch it with --backend orca, never beside its Orca terminal" >&2
+      exit 1
+    fi
+    if [ "$BACKEND" = orca ]; then
+      [ "$ORCA_RECORDED_BACKEND" = orca ] || {
+        echo "error: secondmate $ID is recorded on backend=$ORCA_RECORDED_BACKEND; refusing an Orca launch beside it" >&2
+        exit 1
+      }
+      ORCA_RESPAWN=1
+    fi
   fi
   [ -n "$FIRSTMATE_HOME" ] || {
     echo "error: no firstmate home supplied or registered for $ID" >&2
     exit 1
   }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
-  if [ "$BACKEND" = orca ] && { [ -e "$PROJ_ABS/state/orca-secondmate-launch" ] || [ -L "$PROJ_ABS/state/orca-secondmate-launch" ]; }; then
-    echo "error: unfinished Orca secondmate launch; reconcile $PROJ_ABS/state/orca-secondmate-launch before retrying" >&2
+  if [ "$BACKEND" != orca ] && [ "$RELAUNCH" -eq 0 ] &&
+    { [ -e "$PROJ_ABS/state/orca-secondmate-home" ] || [ -L "$PROJ_ABS/state/orca-secondmate-home" ] ||
+      [ -e "$PROJ_ABS/state/orca-secondmate-launch" ] || [ -L "$PROJ_ABS/state/orca-secondmate-launch" ]; }; then
+    echo "error: $PROJ_ABS is an Orca secondmate home; launch it with --backend orca" >&2
     exit 1
+  fi
+  if [ "$BACKEND" = orca ] && { [ -e "$PROJ_ABS/state/orca-secondmate-launch" ] || [ -L "$PROJ_ABS/state/orca-secondmate-launch" ]; }; then
+    echo "error: unfinished Orca secondmate launch; run bin/fm-orca-reconcile.sh $ID before retrying" >&2
+    exit 1
+  fi
+  if [ "$ORCA_RESPAWN" = 1 ]; then
+    [ "$(fm_meta_get "$STATE/$ID.meta" home)" = "$PROJ_ABS" ] || {
+      echo "error: secondmate $ID is recorded for another home; refusing respawn" >&2
+      exit 1
+    }
+    fm_backend_orca_home_respawn_check "$PROJ_ABS" "$(fm_meta_get "$STATE/$ID.meta" orca_worktree_id)" \
+      "$(fm_meta_get "$STATE/$ID.meta" terminal)" || exit 1
   fi
   if [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
     if ! secondmate_registry_validate_bindings "$DATA/secondmates.md" resolve_path "$ID" "$FIRSTMATE_HOME"; then
@@ -5156,7 +5187,14 @@ EOF
       ORCA_HOME_ATTEMPT="$WT/state/orca-secondmate-launch"
       ( set -o noclobber; printf 'worktree=%s\nterminal=pending\n' "$ORCA_WORKTREE_ID" >"$ORCA_HOME_ATTEMPT" ) || exit 1
       ORCA_ABORT_CLEANUP=1
-      T=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "2ndmate-$ID" "$ORCA_HOME_ATTEMPT") || exit 1
+      # A create that failed after returning a handle still owns that terminal
+      # when it is proven in the home workspace, so the abort path closes it.
+      T=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "2ndmate-$ID" "$ORCA_HOME_ATTEMPT") || {
+        if [ -n "$T" ] && [ "$(fm_backend_orca_terminal_state "$ORCA_WORKTREE_ID" "$T" 2>/dev/null)" = present ]; then
+          ORCA_TERMINAL=$T
+        fi
+        exit 1
+      }
       printf 'worktree=%s\nterminal=%s\n' "$ORCA_WORKTREE_ID" "$T" >"$ORCA_HOME_ATTEMPT" || exit 1
       [ "$(fm_backend_orca_terminal_state "$ORCA_WORKTREE_ID" "$T")" = present ] || {
         echo "error: new Orca secondmate terminal $T is not bound to its home workspace; reconcile $ORCA_HOME_ATTEMPT before retrying" >&2
@@ -5166,8 +5204,7 @@ EOF
     else
       ORCA_SECONDMATE_HOME=
       ORCA_WORKER_LABEL=$W
-      if [ -f "$FM_HOME/.fm-secondmate-home" ] &&
-        { [ -e "$FM_HOME/state/orca-secondmate-launch" ] || [ -L "$FM_HOME/state/orca-secondmate-launch" ]; }; then
+      if [ -f "$FM_HOME/.fm-secondmate-home" ] && fm_backend_orca_home_is_orca "$FM_HOME"; then
         ORCA_SECONDMATE_HOME=$(cd "$FM_HOME" && pwd -P)
         ORCA_WORKER_LABEL=$(fm_backend_orca_worker_label "$ORCA_SECONDMATE_HOME" "$W") || exit 1
       fi
@@ -7267,6 +7304,12 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
 fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+# The published record now names the terminal, so the launch receipt retires
+# and the home is marked as an Orca secondmate home for as long as it lives.
+if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ] && [ -n "$ORCA_HOME_ATTEMPT" ]; then
+  fm_backend_orca_home_mark "$PROJ_ABS" || exit 1
+  rm -f "$ORCA_HOME_ATTEMPT"
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
