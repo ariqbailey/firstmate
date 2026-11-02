@@ -7,7 +7,14 @@
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
-#       "treehouse return". Projects are cloned
+#       "treehouse return". When the explicitly selected backend (FM_BACKEND,
+#       then config/backend) is orca, Orca registers the home as a repository
+#       root and accepts only a main worktree, so the home is instead a
+#       standalone clone of the code root (its own .git directory, origin set
+#       to the code root's origin remote): "-" clones it at
+#       <parent of FM_HOME>/<FM_HOME name>-homes/<id>, a new path is cloned the
+#       same way, and an existing path that is a linked worktree or has no .git
+#       directory is refused before anything is written. Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
@@ -401,8 +408,47 @@ acquire_treehouse_home() {
   printf '%s\n' "$home"
 }
 
+# An explicit backend selection only: Orca is never auto-detected, so the
+# selection a later --secondmate spawn of this home resolves is FM_BACKEND or
+# config/backend.
+seed_backend_is_orca() {
+  local name
+  name=$(. "$SCRIPT_DIR/fm-backend.sh" && fm_backend_explicit_name) || return 1
+  [ "$name" = orca ]
+}
+
+orca_default_home() {
+  local id=$1 active
+  active=$(resolved_path "$FM_HOME")
+  printf '%s/%s-homes/%s\n' "$(dirname "$active")" "$(basename "$active")" "$id"
+}
+
+# Orca registers a secondmate home as its own repository root workspace and
+# refuses one it reports as a linked worktree, which is what a treehouse lease
+# or `git worktree add` produces.
+refuse_non_standalone_orca_home() {
+  local home=$1
+  if [ -f "$home/.git" ]; then
+    echo "error: Orca secondmate home $home is a linked git worktree; Orca accepts a secondmate home only as a standalone clone with its own .git directory (seed a new path, or - for a standalone clone at the default location)" >&2
+    return 1
+  fi
+  if [ ! -d "$home/.git" ] || [ -L "$home/.git" ]; then
+    echo "error: Orca secondmate home $home is not a standalone git clone (no .git directory)" >&2
+    return 1
+  fi
+}
+
+clone_orca_home() {
+  local home=$1 url
+  git clone --quiet "$FM_ROOT" "$home"
+  url=$(git -C "$FM_ROOT" remote get-url origin 2>/dev/null || true)
+  [ -n "$url" ] || return 0
+  url=$(normalize_origin_url "$FM_ROOT" "$url")
+  git -C "$home" remote set-url origin "$url"
+}
+
 ensure_home() {
-  local id=$1 requested=$2 home
+  local id=$1 requested=$2 orca=${3:-0} home
   if [ "$requested" = "-" ]; then
     home=$(acquire_treehouse_home "$id")
     verify_firstmate_home "$home"
@@ -415,7 +461,14 @@ ensure_home() {
     [ -d "$home" ] || { echo "error: $home exists and is not a directory" >&2; return 1; }
   else
     mkdir -p "$(dirname "$home")"
-    git clone --quiet "$FM_ROOT" "$home"
+    if [ "$orca" = 1 ]; then
+      clone_orca_home "$home"
+    else
+      git clone --quiet "$FM_ROOT" "$home"
+    fi
+  fi
+  if [ "$orca" = 1 ]; then
+    refuse_non_standalone_orca_home "$home" || return 1
   fi
   verify_firstmate_home "$home"
 }
@@ -839,7 +892,7 @@ refuse_projectful_projectless_charter() {
 
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
-  local no_projects=0 arg
+  local no_projects=0 orca_home=0 arg
   local filtered=()
   shift 2
   # A deliberate --no-projects signal (anywhere in the project position) seeds a
@@ -872,6 +925,10 @@ seed_home() {
   for project in "$@"; do
     validate_seed_project "$project"
   done
+  if seed_backend_is_orca; then
+    orca_home=1
+    [ "$requested_home" != "-" ] || requested_home=$(orca_default_home "$id")
+  fi
 
   SEED_ROLLBACK_ACTIVE=1
   SEED_COMMITTED=0
@@ -906,7 +963,7 @@ seed_home() {
     validate_home_assignment "$id" "$requested_abs" || return 1
     SEED_HOME="$requested_abs"
     [ -e "$requested_abs" ] || SEED_HOME_CREATED=1
-    home=$(ensure_home "$id" "$requested_abs")
+    home=$(ensure_home "$id" "$requested_abs" "$orca_home")
   fi
   SEED_HOME="$home"
   validate_registry_home_text "$home" || return 1

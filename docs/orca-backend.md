@@ -50,7 +50,9 @@ Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the w
 
 ## Local secondmates
 
-Seed a secondmate with the normal provisioning helper and an explicit home path outside the primary home and code root, then select Orca when launching it.
+Select Orca before seeding, through `config/backend` or `FM_BACKEND=orca`, then seed the secondmate with the normal provisioning helper and launch it on Orca.
+An Orca secondmate home must be a standalone clone with its own `.git` directory, because Orca registers the home as a repository root and refuses a linked worktree with "Orca root workspace identity mismatch".
+With Orca selected, `bin/fm-home-seed.sh` clones the code root instead of leasing a Treehouse worktree, points the clone's `origin` at the code root's `origin` remote, and refuses an existing home path that is a linked worktree; its header owns the default location used for `-`.
 The seeded Git checkout becomes a registered Orca repository, with a terminal initially titled `2ndmate-<id>` in its root workspace; the harness may replace that automatic title.
 The secondmate keeps its own charter, configuration, backlog, project clones, and supervision session.
 Its workers stay independent under their own project repositories, with `2ndmate-<id> · fm-<task-id>` on both their worktree display name and custom terminal title.
@@ -118,6 +120,7 @@ tests/fm-spawn-orca-worktree.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 tests/fm-teardown-endpoint-safety.test.sh
+tests/fm-secondmate-safety.test.sh
 ```
 
 [`verification/runtime-backends.md`](verification/runtime-backends.md#orca) records the real readiness and response-shape smoke.

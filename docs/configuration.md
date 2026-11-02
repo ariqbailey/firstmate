@@ -1207,6 +1207,7 @@ The main first mate routes by reading those scopes with judgment; the project li
 ### Provision a local home
 
 Use `fm-home-seed.sh <id> - {<project>...|--no-projects}` to lease a fresh local firstmate worktree for the secondmate home.
+With Orca selected, the home is a standalone clone instead; see [Orca local secondmates](orca-backend.md#local-secondmates).
 For remote provisioning, including supplied project origins, follow [Remote second mates](remote-secondmates.md#provision-a-route).
 
 Use the deliberate `--no-projects` signal only for a firstmate-repo domain that needs no separate project clones.
