@@ -774,6 +774,45 @@ write_omp_loaded_markers() {
 
 # --- context digest: absent vs empty vs present -----------------------------
 
+test_missing_shared_captain_warning() {
+  local variant rec root home fakebin out count
+  for variant in absent empty malformed local remote present secondmate; do
+    rec=$(new_world "shared-captain-$variant")
+    IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+    make_fake_toolchain "$fakebin"
+    make_fake_ps_claude "$fakebin"
+    case "$variant" in
+      absent) ;;
+      empty) printf '# Secondmates\n' > "$home/data/secondmates.md" ;;
+      malformed) printf '%s\n' '- incomplete record' > "$home/data/secondmates.md" ;;
+      remote)
+        printf '%s\n' '- remote - remote domain (host: host; root: /srv/firstmate; home: /srv/mate; scope: remote domain; projects: none; added 2026-07-01)' > "$home/data/secondmates.md"
+        ;;
+      *)
+        printf '%s\n' '- local - local domain (home: /tmp/unused-mate; scope: local domain; projects: none; added 2026-07-01)' > "$home/data/secondmates.md"
+        case "$variant" in
+          present) : > "$home/data/captain-shared.md" ;;
+          secondmate) printf 'local\n' > "$home/.fm-secondmate-home" ;;
+        esac
+        ;;
+    esac
+    out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+    case "$variant" in
+      local|remote)
+        assert_contains "$out" "$home/data/captain-shared.md is absent" "digest warning did not name missing shared rules"
+        assert_contains "$out" "secondmate-provisioning/SKILL.md#charter-and-seed" "digest warning did not point to provisioning guidance"
+        count=$(printf '%s\n' "$out" | grep -c '^SECONDMATE_SYNC: warning: registered secondmates')
+        [ "$count" -eq 1 ] || fail "expected one shared captain warning for $variant, got $count"
+        [ ! -e "$home/data/captain-shared.md" ] || fail "startup created shared captain rules"
+        ;;
+      *) assert_not_contains "$out" "SECONDMATE_SYNC: warning: registered secondmates" "unexpected shared captain warning for $variant" ;;
+    esac
+  done
+  pass "startup warns once for registered local or remote secondmates missing shared captain rules"
+}
+
 test_context_digest_absent_empty_present() {
   local rec root home fakebin out
   rec=$(new_world context-digest)
@@ -3094,6 +3133,7 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+test_missing_shared_captain_warning
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path

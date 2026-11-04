@@ -309,3 +309,18 @@ secondmate_registry_validate_bindings() {
   fi
   return 0
 }
+
+# Read-only warning shared by successful seeding and local bootstrap detection.
+secondmate_registry_warn_missing_captain_shared() {
+  local home=$1 data=$2 line
+  [ ! -e "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] || return 0
+  [ ! -e "$data/captain-shared.md" ] && [ ! -L "$data/captain-shared.md" ] || return 0
+  [ -f "$data/secondmates.md" ] && [ ! -L "$data/secondmates.md" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if secondmate_registry_parse_line "$line"; then
+      printf 'SECONDMATE_SYNC: warning: registered secondmates have no shared captain rules because %s/captain-shared.md is absent; see .agents/skills/secondmate-provisioning/SKILL.md#charter-and-seed (shared captain preferences)\n' "$data"
+      break
+    fi
+  done < "$data/secondmates.md"
+  return 0
+}

@@ -111,7 +111,8 @@ The declared `config/supervision-host-off` opt-out follows the same primary-auth
 Account pins are not inherited.
 [`Worker account pin`](../../../docs/configuration.md#worker-account-pin-configclaude-account-configpi-account) owns `config/claude-account` and `config/pi-account` inheritance and backend limits; [`T3 provider instances`](../../../docs/t3code-backend.md#provider-instances-and-models) owns T3 account selection.
 [`docs/configuration.md` "Per-secondmate account pins"](../../../docs/configuration.md#per-secondmate-account-pins) owns the explicit `config/secondmate-accounts/<id>/` override and the independent worker pins inside each mate's home.
-`data/captain-shared.md` is main-authoritative in the primary home and read-only in secondmate homes.
+`data/captain-shared.md` is optional, main-authoritative in the primary home, and read-only in secondmate homes.
+Successful seeding and the session-start bootstrap digest warn when a primary has registered secondmates but this file is absent; populate it with standing rules that should reach secondmates, following the boundary below.
 Its primary file header must state that the file is main-authoritative, read-only in secondmate homes, must not be edited there, and that new captain-preference discoveries are routed to the main firstmate through marked status or a document pointer.
 Every propagation point converges the secondmate copy to the primary bytes; when the primary file is absent, any existing secondmate copy is quarantined and removed so absence converges too.
 Both the local helper and the remote receiver compare the destination against the generation each last published there, so an untouched inherited copy is replaced quietly instead of being reported as drift.

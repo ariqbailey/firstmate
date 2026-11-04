@@ -107,7 +107,7 @@ test_seed_allows_overlapping_clones_and_drops_owner() {
   # registry never uses the legacy owns: field, and the removed `owner` subcommand
   # stays gone. The full happy seed - charter copied, clones+origins, no-mistakes
   # init, modes preserved - is asserted by fm-secondmate-lifecycle-e2e.
-  local home design other
+  local home design other out
   home="$TMP_ROOT/overlap-main"
   design="$TMP_ROOT/overlap-design"
   other="$TMP_ROOT/overlap-other"
@@ -121,19 +121,25 @@ test_seed_allows_overlapping_clones_and_drops_owner() {
 - beta [direct-PR] - beta project (added 2026-06-22)
 EOF
 
-  FM_HOME="$home" FM_SECONDMATE_CHARTER='feature design for alpha beta' \
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='feature design for alpha beta' \
     FM_SECONDMATE_SCOPE='feature design for alpha beta' \
-    "$ROOT/bin/fm-home-seed.sh" design "$design" alpha beta >/dev/null \
+    "$ROOT/bin/fm-home-seed.sh" design "$design" alpha beta 2>&1) \
     || fail "initial seed failed"
+  assert_contains "$out" "SECONDMATE_SYNC: warning: registered secondmates" "seed did not warn about missing shared rules"
+  assert_contains "$out" "$home/data/captain-shared.md" "seed warning did not name the missing file"
+  assert_contains "$out" "secondmate-provisioning/SKILL.md#charter-and-seed" "seed warning did not point to provisioning guidance"
+  [ ! -e "$home/data/captain-shared.md" ] || fail "seed created shared captain rules"
   assert_grep '- design - feature design for alpha beta' "$home/data/secondmates.md" "design registry line missing"
   assert_grep 'projects: alpha, beta' "$home/data/secondmates.md" "design project clone list missing"
   assert_no_grep 'owns:' "$home/data/secondmates.md" "registry used the legacy owns field"
 
   # beta is shared with a second secondmate of a different scope (overlap allowed).
-  FM_HOME="$home" FM_SECONDMATE_CHARTER='issue triage for beta' \
+  : > "$home/data/captain-shared.md"
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='issue triage for beta' \
     FM_SECONDMATE_SCOPE='issue triage for beta' \
-    "$ROOT/bin/fm-home-seed.sh" other "$other" beta >/dev/null 2>&1 \
+    "$ROOT/bin/fm-home-seed.sh" other "$other" beta 2>&1) \
     || fail "seed refused overlapping project clones across different scopes"
+  assert_not_contains "$out" "SECONDMATE_SYNC: warning: registered secondmates" "seed warned despite a present shared file"
   assert_grep '- other - issue triage for beta' "$home/data/secondmates.md" "overlapping registry line missing"
   FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation rejected overlapping clones"
 

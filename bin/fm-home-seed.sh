@@ -25,6 +25,7 @@
 #       is copied to data/charter.md, newly cloned no-mistakes projects are
 #       initialized, an ignored .fm-secondmate-parent binding is published before
 #       the .fm-secondmate-home identity marker, and data/secondmates.md is updated.
+#       Successful seeding warns if the primary lacks data/captain-shared.md.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
@@ -1062,6 +1063,7 @@ seed_home() {
   trap - EXIT
   rm -rf -- "$SEED_BACKUP_DIR"
   printf 'home=%s\n' "$home"
+  secondmate_registry_warn_missing_captain_shared "$FM_HOME" "$DATA" >&2
 }
 
 case "${1:-}" in
