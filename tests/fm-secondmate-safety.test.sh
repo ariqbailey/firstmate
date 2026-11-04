@@ -107,7 +107,7 @@ test_seed_allows_overlapping_clones_and_drops_owner() {
   # registry never uses the legacy owns: field, and the removed `owner` subcommand
   # stays gone. The full happy seed - charter copied, clones+origins, no-mistakes
   # init, modes preserved - is asserted by fm-secondmate-lifecycle-e2e.
-  local home design other
+  local home design other out
   home="$TMP_ROOT/overlap-main"
   design="$TMP_ROOT/overlap-design"
   other="$TMP_ROOT/overlap-other"
@@ -121,19 +121,25 @@ test_seed_allows_overlapping_clones_and_drops_owner() {
 - beta [direct-PR] - beta project (added 2026-06-22)
 EOF
 
-  FM_HOME="$home" FM_SECONDMATE_CHARTER='feature design for alpha beta' \
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='feature design for alpha beta' \
     FM_SECONDMATE_SCOPE='feature design for alpha beta' \
-    "$ROOT/bin/fm-home-seed.sh" design "$design" alpha beta >/dev/null \
+    "$ROOT/bin/fm-home-seed.sh" design "$design" alpha beta 2>&1) \
     || fail "initial seed failed"
+  assert_contains "$out" "SECONDMATE_SYNC: warning: registered secondmates" "seed did not warn about missing shared rules"
+  assert_contains "$out" "$home/data/captain-shared.md" "seed warning did not name the missing file"
+  assert_contains "$out" "secondmate-provisioning/SKILL.md#charter-and-seed" "seed warning did not point to provisioning guidance"
+  [ ! -e "$home/data/captain-shared.md" ] || fail "seed created shared captain rules"
   assert_grep '- design - feature design for alpha beta' "$home/data/secondmates.md" "design registry line missing"
   assert_grep 'projects: alpha, beta' "$home/data/secondmates.md" "design project clone list missing"
   assert_no_grep 'owns:' "$home/data/secondmates.md" "registry used the legacy owns field"
 
   # beta is shared with a second secondmate of a different scope (overlap allowed).
-  FM_HOME="$home" FM_SECONDMATE_CHARTER='issue triage for beta' \
+  : > "$home/data/captain-shared.md"
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='issue triage for beta' \
     FM_SECONDMATE_SCOPE='issue triage for beta' \
-    "$ROOT/bin/fm-home-seed.sh" other "$other" beta >/dev/null 2>&1 \
+    "$ROOT/bin/fm-home-seed.sh" other "$other" beta 2>&1) \
     || fail "seed refused overlapping project clones across different scopes"
+  assert_not_contains "$out" "SECONDMATE_SYNC: warning: registered secondmates" "seed warned despite a present shared file"
   assert_grep '- other - issue triage for beta' "$home/data/secondmates.md" "overlapping registry line missing"
   FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation rejected overlapping clones"
 
@@ -301,6 +307,101 @@ test_home_seed_uses_treehouse_acquired_home() {
   [ -d "$acquired/projects/alpha/.git" ] || fail "seed did not clone project into acquired home"
   grep -F "home: $acquired_abs" "$home/data/secondmates.md" >/dev/null || fail "registry did not record acquired home"
   pass "home seeding durably leases treehouse-acquired dash homes under the secondmate id"
+}
+
+# The origin a standalone Orca home clone must carry: the code root's own
+# origin remote, or the code root path git records when it has none.
+orca_home_expected_origin() {
+  local url
+  url=$(git -C "$ROOT" remote get-url origin 2>/dev/null || true)
+  if [ -n "$url" ]; then
+    printf '%s\n' "$url"
+  else
+    printf '%s\n' "$ROOT"
+  fi
+}
+
+test_home_seed_orca_dash_clones_standalone_home() {
+  local home home_abs expected fakebin log out
+  home="$TMP_ROOT/orca-dash-home"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/orca-dash-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/orca-dash-fake")
+  log="$TMP_ROOT/orca-dash-fake/tmux.log"
+  home_abs=$(cd "$home" && pwd -P)
+  expected="$(dirname "$home_abs")/orca-dash-home-homes/dash"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BACKEND=orca FM_FAKE_TMUX_LOG="$log" \
+    FM_SECONDMATE_CHARTER='orca dash scope' FM_SECONDMATE_SCOPE='orca dash scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash - alpha) \
+    || fail "Orca seed failed for a dash home"
+  printf '%s\n' "$out" | grep -Fx "home=$expected" >/dev/null || fail "Orca dash seed did not report the default standalone home"
+  if [ -f "$log" ] && grep -F 'treehouse' "$log" >/dev/null; then
+    fail "Orca dash seed leased a treehouse worktree"
+  fi
+  [ -d "$expected/.git" ] || fail "Orca dash home is not a standalone clone with its own .git directory"
+  [ "$(git -C "$expected" rev-parse --git-dir)" = .git ] || fail "Orca dash home git dir is not its own .git"
+  [ "$(git -C "$expected" remote get-url origin)" = "$(orca_home_expected_origin)" ] \
+    || fail "Orca dash home origin does not match the code root origin"
+  [ "$(cat "$expected/.fm-secondmate-home")" = dash ] || fail "Orca dash seed did not mark the home"
+  [ -d "$expected/projects/alpha/.git" ] || fail "Orca dash seed did not clone the project"
+  grep -F "home: $expected" "$home/data/secondmates.md" >/dev/null || fail "registry did not record the Orca dash home"
+  pass "Orca home seeding clones a standalone home for - instead of leasing a worktree"
+}
+
+test_home_seed_orca_config_backend_clones_standalone_path() {
+  local home subhome subhome_abs
+  home="$TMP_ROOT/orca-path-home"
+  subhome="$TMP_ROOT/orca-path-subhome"
+  mkdir -p "$home/projects" "$home/data" "$home/state" "$home/config"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/orca-path-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  printf 'orca\n' > "$home/config/backend"
+
+  env -u FM_BACKEND FM_HOME="$home" FM_SECONDMATE_CHARTER='orca path scope' FM_SECONDMATE_SCOPE='orca path scope' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
+    || fail "Orca seed failed for an explicit new home path"
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  [ -d "$subhome/.git" ] || fail "Orca explicit-path home is not a standalone clone"
+  [ "$(git -C "$subhome" remote get-url origin)" = "$(orca_home_expected_origin)" ] \
+    || fail "Orca explicit-path home origin does not match the code root origin"
+  grep -F "home: $subhome_abs" "$home/data/secondmates.md" >/dev/null || fail "registry did not record the Orca explicit-path home"
+  pass "Orca home seeding from config/backend clones a new path with the code root origin"
+}
+
+test_home_seed_orca_refuses_linked_worktree_home() {
+  local home source linked err
+  home="$TMP_ROOT/orca-linked-home"
+  source="$TMP_ROOT/orca-linked-source"
+  linked="$TMP_ROOT/orca-linked-subhome"
+  err="$TMP_ROOT/orca-linked.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/orca-linked-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  git clone --quiet "$ROOT" "$source"
+  git -C "$source" worktree add --quiet --detach "$linked" HEAD
+
+  if FM_HOME="$home" FM_BACKEND=orca FM_SECONDMATE_CHARTER='orca linked scope' FM_SECONDMATE_SCOPE='orca linked scope' \
+    "$ROOT/bin/fm-home-seed.sh" design "$linked" alpha >/dev/null 2>"$err"; then
+    fail "Orca seed accepted a linked worktree home"
+  fi
+  grep -F 'is a linked git worktree' "$err" >/dev/null || fail "Orca seed did not explain the linked worktree refusal"
+  [ -d "$linked" ] || fail "Orca seed refusal removed the supplied linked worktree"
+  [ ! -e "$linked/.fm-secondmate-home" ] || fail "Orca linked worktree refusal wrote a marker"
+  [ ! -e "$linked/projects/alpha" ] || fail "Orca linked worktree refusal cloned a project"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- design ' "$home/data/secondmates.md" >/dev/null; then
+    fail "Orca linked worktree refusal wrote a registry route"
+  fi
+
+  # The same linked worktree still seeds on a non-Orca backend.
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='tmux linked scope' FM_SECONDMATE_SCOPE='tmux linked scope' \
+    "$ROOT/bin/fm-home-seed.sh" design "$linked" alpha >/dev/null \
+    || fail "non-Orca seed refused a linked worktree home"
+  pass "Orca home seeding refuses a linked worktree home and leaves non-Orca seeding unchanged"
 }
 
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
@@ -3144,6 +3245,9 @@ test_home_seed_refuses_projectless_home_with_uninspectable_registry
 test_home_seed_refuses_missing_projects_without_signal
 test_home_seed_refuses_local_only_project
 test_home_seed_refuses_an_unresolvable_registry_posture
+test_home_seed_orca_dash_clones_standalone_home
+test_home_seed_orca_config_backend_clones_standalone_path
+test_home_seed_orca_refuses_linked_worktree_home
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id

@@ -276,6 +276,9 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
       ;;
     *)
       FM_SM_LIVE_REASON="agent recovery classifier unverified (backend=$backend)"
+      # An Orca secondmate has an explicit guarded relaunch instead.
+      [ "$backend" != orca ] ||
+        FM_SM_LIVE_REASON="$FM_SM_LIVE_REASON; if it is down, relaunch it with fm-spawn.sh $id --backend orca --secondmate, which proves its home workspace empty first"
       ;;
   esac
   return 0
